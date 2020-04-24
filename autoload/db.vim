@@ -109,15 +109,16 @@ function! s:filter(url) abort
   return db#adapter#dispatch(a:url, op)
 endfunction
 
-function! s:filter_write(url, in, out) abort
+function! s:filter_write(url, in, out, callback) abort
   let cmd = s:filter(a:url) . ' ' .
         \ db#adapter#call(a:url, 'input_flag', [], '< ') . shellescape(a:in)
-  if exists('*systemlist')
-    let lines = systemlist(cmd)
-  else
-    let lines = split(system(cmd), "\n", 1)
-  endif
-  call writefile(lines, a:out, 'b')
+
+  call db#job#run(cmd, function('s:query_callback', [a:out, a:callback]))
+endfunction
+
+function! s:query_callback(out, callback, lines) abort
+  call writefile(a:lines, a:out, 'b')
+  return a:callback()
 endfunction
 
 function! db#connect(url) abort
@@ -144,8 +145,16 @@ function! db#connect(url) abort
 endfunction
 
 function! s:reload() abort
-  call s:filter_write(b:db, b:db_input, expand('%:p'))
+  call s:filter_write(b:db, b:db_input, expand('%:p'), function('s:reload_done', [winnr()]))
+endfunction
+
+function! s:reload_done(winnr) abort
+  let old_winnr = winnr()
+  exe a:winnr.'wincmd w'
   edit!
+  if old_winnr !=? a:winnr
+    wincmd p
+  endif
 endfunction
 
 let s:url_pattern = '\%([abgltvw]:\w\+\|\a[[:alnum:].+-]\+:\S*\|\$[[:alpha:]_]\S*\|[.~]\=/\S*\|[.~]\|\%(type\|profile\)=\S\+\)\S\@!'
@@ -261,26 +270,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
       if exists('lines')
         call writefile(lines, infile)
       endif
-      call s:filter_write(conn, infile, outfile)
-      execute 'autocmd BufReadPost' fnameescape(tr(outfile, '\', '/'))
-            \ 'let b:db_input =' string(infile)
-            \ '| let b:db =' string(conn)
-            \ '| let w:db = b:db'
-            \ '| call s:init()'
-      let s:results[conn] = outfile
-      if a:bang
-        silent execute mods 'botright split' outfile
-      else
-        if db#adapter#call(conn, 'can_echo', [infile, outfile], 0)
-          if v:shell_error
-            echohl ErrorMsg
-          endif
-          echo substitute(join(readfile(outfile), "\n"), "\n*$", '', '')
-          echohl NONE
-          return ''
-        endif
-        silent execute mods 'botright pedit' outfile
-      endif
+      call s:filter_write(conn, infile, outfile, function('s:filter_write_done', [mods, a:bang, conn, infile, outfile]))
     endif
   catch /^DB exec error: /
     redraw
@@ -292,6 +282,28 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
     return 'echoerr '.string(v:exception)
   endtry
   return ''
+endfunction
+
+function! s:filter_write_done(mods, bang, conn, infile, outfile) abort
+  execute 'autocmd BufReadPost' fnameescape(tr(a:outfile, '\', '/'))
+        \ 'let b:db_input =' string(a:infile)
+        \ '| let b:db =' string(a:conn)
+        \ '| let w:db = b:db'
+        \ '| call s:init()'
+  let s:results[a:conn] = a:outfile
+  if a:bang
+    silent execute a:mods 'botright split' a:outfile
+  else
+    if db#adapter#call(a:conn, 'can_echo', [a:infile, a:outfile], 0)
+      if v:shell_error
+        echohl ErrorMsg
+      endif
+      echo substitute(join(readfile(a:outfile), "\n"), "\n*$", '', '')
+      echohl NONE
+      return ''
+    endif
+    silent execute a:mods 'botright pedit' a:outfile
+  endif
 endfunction
 
 function! s:glob(pattern, prelength) abort
