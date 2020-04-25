@@ -113,15 +113,17 @@ function! s:filter_write(url, in, out) abort
   let cmd = s:filter(a:url) . ' ' .
         \ db#adapter#call(a:url, 'input_flag', [], '< ') . shellescape(a:in)
 
-  call db#job#run(cmd, function('s:query_callback', [a:out]))
+  call db#job#run(cmd, function('s:query_callback', [a:out]), a:out)
 endfunction
 
-function! s:query_callback(out, lines) abort
+function! s:query_callback(out, lines, write) abort
   let winnr = bufwinnr(bufnr(a:out))
   if winnr ==? -1
     return
   endif
-  call writefile(a:lines, a:out, 'b')
+  if a:write
+    call writefile(a:lines, a:out, 'b')
+  endif
   let old_winnr = winnr()
   if winnr !=? old_winnr
     exe winnr.'wincmd w'

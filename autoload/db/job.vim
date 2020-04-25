@@ -1,32 +1,25 @@
-let s:vim_job = {'output': '' }
+let s:vim_job = {'output': [] }
 function! s:vim_job.cb(job, data) dict abort
-  if type(a:data) ==? type(0)
-    if !empty(self.output)
-      let self.output = split(self.output, "\n", 1)
-    else
-      let self.output = []
-    endif
-    return s:on_job_done(self, a:data)
-  endif
-  let self.output .= a:data
+  let is_canceled = a:data ==? -1
+  return s:on_job_done(self, a:data, is_canceled)
 endfunction
 
 function! s:nvim_job_cb(jobid, data, event) dict abort
   if a:event ==? 'exit'
-    return s:on_job_done(self, a:data)
+    return s:on_job_done(self, a:data, 1)
   endif
   call extend(self.output, a:data)
 endfunction
 
-function! s:on_job_done(job, data) abort
+function! s:on_job_done(job, data, write) abort
   call settabvar(a:job.tabnr, 'db_job_id', '')
-  if a:data !=? 0 && empty(a:job.output)
-    return a:job.callback(['Exit with status '.a:data])
+  if a:data !=? 0 && empty(filter(a:job.output, '!empty(trim(v:val))'))
+    return a:job.callback(['Exit with status '.a:data], a:write)
   endif
-  return a:job.callback(a:job.output)
+  return a:job.callback(a:job.output, a:write)
 endfunction
 
-function! db#job#run(cmd, callback) abort
+function! db#job#run(cmd, callback, outfile) abort
   if get(g:, 'db_async', 0) && has('nvim')
     let t:db_job_id = jobstart(a:cmd, {
           \ 'on_stdout': function('s:nvim_job_cb'),
@@ -46,8 +39,8 @@ function! db#job#run(cmd, callback) abort
     let fn.callback = a:callback
     let fn.tabnr = tabpagenr()
     let t:db_job_id = job_start([&shell, '-c', a:cmd], {
-          \ 'out_cb': fn.cb,
-          \ 'err_cb': fn.cb,
+          \ 'out_io': 'file',
+          \ 'out_name': a:outfile,
           \ 'exit_cb': fn.cb,
           \ 'mode': 'raw'
           \ })
@@ -59,7 +52,7 @@ function! db#job#run(cmd, callback) abort
   else
     let lines = split(system(a:cmd), "\n", 1)
   endif
-  return a:callback(lines)
+  return a:callback(lines, 1)
 endfunction
 
 function! db#job#check_job_running() abort
