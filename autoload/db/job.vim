@@ -38,12 +38,18 @@ function! db#job#run(cmd, callback, outfile) abort
     let fn = copy(s:vim_job)
     let fn.callback = a:callback
     let fn.tabnr = tabpagenr()
-    let t:db_job_id = job_start([&shell, '-c', a:cmd], {
+    let opts = {
           \ 'out_io': 'file',
           \ 'out_name': a:outfile,
           \ 'exit_cb': fn.cb,
           \ 'mode': 'raw'
-          \ })
+          \ }
+
+    if has('patch-8.1.350')
+      let opts['noblock'] = 1
+    endif
+
+    let t:db_job_id = job_start([&shell, '-c', a:cmd], opts)
     return t:db_job_id
   endif
 
