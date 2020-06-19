@@ -1,3 +1,12 @@
+" Hide pointless `No matching autocommands` in Vim
+if !has('nvim')
+  augroup db_dummy_autocmd
+    autocmd!
+    autocmd User DBQueryStart "
+    autocmd User DBQueryFinished "
+  augroup END
+endif
+
 let s:vim_job = {'output': [] }
 function! s:vim_job.cb(job, data) dict abort
   let is_canceled = a:data ==? -1
@@ -13,6 +22,7 @@ endfunction
 
 function! s:on_job_done(job, data, write) abort
   call settabvar(a:job.tabnr, 'db_job_id', '')
+  doautocmd User DBQueryFinished
   if a:data !=? 0 && empty(filter(a:job.output, '!empty(trim(v:val))'))
     return a:job.callback(['Exit with status '.a:data], a:write)
   endif
@@ -20,6 +30,7 @@ function! s:on_job_done(job, data, write) abort
 endfunction
 
 function! db#job#run(cmd, callback, outfile) abort
+  doautocmd User DBQueryStart
   if get(g:, 'db_async', 0) && has('nvim')
     let t:db_job_id = jobstart(a:cmd, {
           \ 'on_stdout': function('s:nvim_job_cb'),
@@ -58,6 +69,7 @@ function! db#job#run(cmd, callback, outfile) abort
   else
     let lines = split(system(a:cmd), "\n", 1)
   endif
+  doautocmd User DBQueryFinished
   return a:callback(lines, 1)
 endfunction
 
