@@ -112,12 +112,26 @@ endfunction
 function! s:filter_write(url, in, out) abort
   let cmd = s:filter(a:url) . ' ' .
         \ db#adapter#call(a:url, 'input_flag', [], '< ') . shellescape(a:in)
-  if exists('*systemlist')
-    let lines = systemlist(cmd)
-  else
-    let lines = split(system(cmd), "\n", 1)
+
+  call db#job#run(cmd, function('s:query_callback', [a:out]), a:out)
+endfunction
+
+function! s:query_callback(out, lines, write) abort
+  let winnr = bufwinnr(bufnr(a:out))
+  if winnr ==? -1
+    return
   endif
-  call writefile(lines, a:out, 'b')
+  if a:write
+    call writefile(a:lines, a:out, 'b')
+  endif
+  let old_winnr = winnr()
+  if winnr !=? old_winnr
+    exe winnr.'wincmd w'
+  endif
+  edit!
+  if winnr !=? old_winnr
+    exe old_winnr.'wincmd w'
+  endif
 endfunction
 
 function! db#connect(url) abort
@@ -144,8 +158,8 @@ function! db#connect(url) abort
 endfunction
 
 function! s:reload() abort
+  call db#job#check_job_running()
   call s:filter_write(b:db, b:db_input, expand('%:p'))
-  edit!
 endfunction
 
 let s:url_pattern = '\%([abgltvw]:\w\+\|\a[[:alnum:].+-]\+:\S*\|\$[[:alpha:]_]\S*\|[.~]\=/\S*\|[.~]\|\%(type\|profile\)=\S\+\)\S\@!'
@@ -165,6 +179,7 @@ function! s:init() abort
   nnoremap <buffer><silent> q :bd<CR>
   nnoremap <buffer><nowait> r :DB <C-R>=get(readfile(b:db_input, 1), 0)<CR>
   nnoremap <buffer><silent> R :call <SID>reload()<CR>
+  nnoremap <buffer><silent> <C-c> :call db#job#cancel()<CR>
 endfunction
 
 function! db#unlet() abort
@@ -209,6 +224,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
         redraw!
       endif
     else
+      call db#job#check_job_running()
       let file = tempname()
       let infile = file . '.' . db#adapter#call(conn, 'input_extension', [], 'sql')
       let outfile = file . '.' . db#adapter#call(conn, 'output_extension', [], 'dbout')
@@ -261,12 +277,14 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
       if exists('lines')
         call writefile(lines, infile)
       endif
-      call s:filter_write(conn, infile, outfile)
+      call writefile(['Running query...'], outfile)
       execute 'autocmd BufReadPost' fnameescape(tr(outfile, '\', '/'))
             \ 'let b:db_input =' string(infile)
             \ '| let b:db =' string(conn)
             \ '| let w:db = b:db'
             \ '| call s:init()'
+      execute 'autocmd BufUnload' fnameescape(tr(outfile, '\', '/'))
+            \ 'call db#job#cancel()'
       let s:results[conn] = outfile
       if a:bang
         silent execute mods 'botright split' outfile
@@ -281,6 +299,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
         endif
         silent execute mods 'botright pedit' outfile
       endif
+      call s:filter_write(conn, infile, outfile)
     endif
   catch /^DB exec error: /
     redraw
