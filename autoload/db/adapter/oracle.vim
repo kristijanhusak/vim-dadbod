@@ -37,6 +37,16 @@ function! db#adapter#oracle#dbext(url) abort
   return {'srvname': s:conn(url), 'host': '', 'port': '', 'dbname': ''}
 endfunction
 
+function! db#adapter#oracle#tables(url)
+  let l:names = split(system("echo 'set markup csv on;\nselect table_name from user_tables;' | " . db#adapter#oracle#interactive(a:url)), '\n')[12:-6]
+
+  for l:i in range(len(l:names))
+    let l:names[l:i] = l:names[l:i][1:-2]
+  endfor
+
+  return l:names
+endfunction
+
 function! db#adapter#oracle#massage(input) abort
   if a:input =~# ";\s*\n*$"
     return a:input
