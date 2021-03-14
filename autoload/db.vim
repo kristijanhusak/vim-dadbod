@@ -7,6 +7,8 @@ if !exists('s:passwords')
   let s:passwords = {}
 endif
 
+let s:supports_async = has('nvim') || exists('*job_start')
+
 function! s:expand(expr) abort
   return exists('*DotenvExpand') ? DotenvExpand(a:expr) : expand(a:expr)
 endfunction
@@ -152,18 +154,85 @@ function! s:systemlist(cmd, ...) abort
   endif
 endfunction
 
+function! s:systemlist_async(cmd, return_err_status)
+  let content = []
+  let status = 0
+
+  function! s:systemlist_job_cb(output, job, job_status) closure
+    call extend(content, a:output)
+    let status = a:job_status
+  endfunction
+
+  let job = db#job#run(a:cmd + a:000, funcref('s:systemlist_job_cb'))
+  call db#job#wait(job)
+
+  if a:return_err_status
+    return [content, status]
+  endif
+  return content
+endfunction
+
+function! s:check_job_running() abort
+  let is_running = db#job#is_running(get(t:, 'db_job_id', ''))
+  if is_running
+    throw 'DB: Query already running for this tab'
+  endif
+endfunction
+
 function! db#systemlist(cmd, ...) abort
-  let lines = call('s:systemlist', [a:cmd] + a:000)
+  let return_err_status = type(a:cmd) ==# type([])
+  let cmd = type(a:cmd) ==# type([]) ? a:cmd : [a:cmd]
+
+  if s:supports_async
+    return s:systemlist_async(cmd, return_err_status)
+  endif
+
+  let lines = call('s:systemlist', cmd + a:000)
+  if return_err_status
+    return [lines, v:shell_error]
+  endif
   return v:shell_error ? [] : lines
 endfunction
 
 function! s:filter_write(url, in, out) abort
   let cmd = s:filter(a:url, a:in)
+  if s:supports_async
+    call s:check_job_running()
+    echo 'DB: Running query...'
+    call setbufvar(bufnr(a:out), '&modified', 1)
+    let t:db_job_id = db#job#run(cmd, function('s:query_callback', [a:out]))
+    return
+  endif
   let lines = s:systemlist(cmd)
   if len(lines)
     call add(lines, '')
   endif
   call writefile(lines, a:out, 'b')
+endfunction
+
+function! s:query_callback(out, lines, job, status)
+  unlet! t:db_job_id
+  let winnr = bufwinnr(bufnr(a:out))
+  let status_msg = a:status ? 'DB: Canceled' : 'DB: Done'
+  call writefile(a:lines, a:out, 'b')
+  call setbufvar(bufnr(a:out), '&modified', 0)
+
+  if winnr ==? -1
+    echo status_msg
+    return
+  endif
+
+  let old_winnr = winnr()
+
+  if winnr !=? old_winnr
+    silent! exe winnr.'wincmd w'
+  endif
+  edit!
+  if winnr !=? old_winnr
+    silent! exe old_winnr.'wincmd w'
+  endif
+
+  echo status_msg
 endfunction
 
 function! db#connect(url) abort
@@ -174,16 +243,18 @@ function! db#connect(url) abort
   endif
   let input = s:temp_content(db#adapter#call(url, 'auth_input', [], "\n"))
   let pattern = db#adapter#call(url, 'auth_pattern', [], 'auth\|login')
-  let out = join(s:systemlist(s:filter(url, input)), "\n")
-  if v:shell_error && out =~? pattern && resolved =~# '^[^:]*://[^:/@]*@'
+  let [out, err] = db#systemlist(s:filter(url, input))
+  let out = join(out, "\n")
+  if err && out =~? pattern && resolved =~# '^[^:]*://[^:/@]*@'
     let password = inputsecret('Password: ')
     let url = substitute(resolved, '://[^:/@]*\zs@', ':'.db#url#encode(password).'@', '')
-    let out = join(s:systemlist(s:filter(url, input)), "\n")
-    if !v:shell_error
+    let [out, err] = db#systemlist(s:filter(url, input))
+    let out = join(out, "\n")
+    if !err
       let s:passwords[resolved] = password
     endif
   endif
-  if !v:shell_error
+  if !err
     return url
   endif
   throw 'DB exec error: '.out
@@ -191,7 +262,9 @@ endfunction
 
 function! s:reload() abort
   call s:filter_write(b:db, b:db_input, expand('%:p'))
-  edit!
+  if !s:supports_async
+    edit!
+  endif
 endfunction
 
 let s:url_pattern = '\%([abgltvw]:\w\+\|\a[[:alnum:].+-]\+:\S*\|\$[[:alpha:]_]\S*\|[.~]\=/\S*\|[.~]\|\%(type\|profile\)=\S\+\)\S\@!'
@@ -211,6 +284,7 @@ function! s:init() abort
   nnoremap <buffer><silent> q :bd<CR>
   nnoremap <buffer><nowait> r :DB <C-R>=get(readfile(b:db_input, 1), 0)<CR>
   nnoremap <buffer><silent> R :call <SID>reload()<CR>
+  nnoremap <buffer><silent> <C-c> :call db#job#cancel(get(t:, 'db_job_id', ''))<CR>
 endfunction
 
 function! db#unlet() abort
@@ -258,6 +332,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
         redraw!
       endif
     else
+      call s:check_job_running()
       let file = tempname()
       let infile = file . '.' . db#adapter#call(conn, 'input_extension', [], 'sql')
       let outfile = file . '.' . db#adapter#call(conn, 'output_extension', [], 'dbout')
@@ -310,17 +385,23 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
       if exists('lines')
         call writefile(lines, infile)
       endif
-      call s:filter_write(conn, infile, outfile)
+      if !s:supports_async
+        call s:filter_write(conn, infile, outfile)
+      else
+        call writefile([], outfile, 'b')
+      endif
       execute 'autocmd BufReadPost' fnameescape(tr(outfile, '\', '/'))
             \ 'let b:db_input =' string(infile)
             \ '| let b:db =' string(conn)
             \ '| let w:db = b:db'
             \ '| call s:init()'
+      execute 'autocmd BufUnload' fnameescape(tr(outfile, '\', '/'))
+            \ 'call db#job#cancel(get(t:, "db_job_id", ""))'
       let s:results[conn] = outfile
       if a:bang
         silent execute mods 'botright split' outfile
       else
-        if db#adapter#call(conn, 'can_echo', [infile, outfile], 0)
+        if !s:supports_async && db#adapter#call(conn, 'can_echo', [infile, outfile], 0)
           if v:shell_error
             echohl ErrorMsg
           endif
@@ -329,6 +410,9 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
           return ''
         endif
         silent execute mods 'botright pedit' outfile
+      endif
+      if s:supports_async
+        call s:filter_write(conn, infile, outfile)
       endif
     endif
   catch /^DB exec error: /
