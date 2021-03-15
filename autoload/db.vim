@@ -194,13 +194,13 @@ function! db#systemlist(cmd, ...) abort
   return v:shell_error ? [] : lines
 endfunction
 
-function! s:filter_write(url, in, out) abort
+function! s:filter_write(url, in, out, mods, bang) abort
   let cmd = s:filter(a:url, a:in)
   if s:supports_async
     call s:check_job_running()
     echo 'DB: Running query...'
     call setbufvar(bufnr(a:out), '&modified', 1)
-    let t:db_job_id = db#job#run(cmd, function('s:query_callback', [a:out]))
+    let t:db_job_id = db#job#run(cmd, function('s:query_callback', [a:out, a:mods, a:bang]))
     return
   endif
   let lines = s:systemlist(cmd)
@@ -210,7 +210,7 @@ function! s:filter_write(url, in, out) abort
   call writefile(lines, a:out, 'b')
 endfunction
 
-function! s:query_callback(out, lines, status)
+function! s:query_callback(out, mods, bang, lines, status)
   unlet! t:db_job_id
   let winnr = bufwinnr(bufnr(a:out))
   let status_msg = a:status ? 'DB: Canceled' : 'DB: Done'
@@ -218,6 +218,7 @@ function! s:query_callback(out, lines, status)
   call setbufvar(bufnr(a:out), '&modified', 0)
 
   if winnr ==? -1
+    call s:open_preview(a:out, a:mods, a:bang)
     echo status_msg
     return
   endif
@@ -233,6 +234,14 @@ function! s:query_callback(out, lines, status)
   endif
 
   echo status_msg
+endfunction
+
+function! s:open_preview(outfile, mods, bang)
+  if a:bang
+    silent execute a:mods 'split' a:outfile
+  else
+    silent execute a:mods 'pedit' a:outfile
+  endif
 endfunction
 
 function! db#connect(url) abort
@@ -261,7 +270,7 @@ function! db#connect(url) abort
 endfunction
 
 function! s:reload() abort
-  call s:filter_write(b:db, b:db_input, expand('%:p'))
+  call s:filter_write(b:db, b:db_input, expand('%:p'), b:db_mods, b:db_bang)
   if !s:supports_async
     edit!
   endif
@@ -389,20 +398,22 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
         call writefile(lines, infile)
       endif
       if !s:supports_async
-        call s:filter_write(conn, infile, outfile)
+        call s:filter_write(conn, infile, outfile, mods, a:bang)
       else
         call writefile([], outfile, 'b')
       endif
       execute 'autocmd BufReadPost' fnameescape(tr(outfile, '\', '/'))
             \ 'let b:db_input =' string(infile)
+            \ '| let b:db_mods =' string(mods)
+            \ '| let b:db_bang =' string(a:bang)
             \ '| let b:db =' string(conn)
             \ '| let w:db = b:db'
             \ '| call s:init()'
-      execute 'autocmd BufUnload' fnameescape(tr(outfile, '\', '/'))
+      execute 'autocmd BufDelete' fnameescape(tr(outfile, '\', '/'))
             \ 'call db#job#cancel(get(t:, "db_job_id", ""))'
       let s:results[conn] = outfile
       if a:bang
-        silent execute mods 'split' outfile
+        call s:open_preview(outfile, mods, a:bang)
       else
         if !s:supports_async && db#adapter#call(conn, 'can_echo', [infile, outfile], 0)
           if v:shell_error
@@ -412,10 +423,10 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
           echohl NONE
           return ''
         endif
-        silent execute mods 'pedit' outfile
+        call s:open_preview(outfile, mods, a:bang)
       endif
       if s:supports_async
-        call s:filter_write(conn, infile, outfile)
+        call s:filter_write(conn, infile, outfile, mods, a:bang)
       endif
     endif
   catch /^DB exec error: /
