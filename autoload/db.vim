@@ -180,7 +180,7 @@ function! s:check_job_running() abort
 endfunction
 
 function! db#systemlist(cmd, ...) abort
-  let return_err_status = type(a:cmd) ==# type([])
+  let return_err_status = len(a:000) ==# 1 && type(a:1) ==# type(0)
   let cmd = type(a:cmd) ==# type([]) ? a:cmd : [a:cmd]
 
   if s:supports_async
@@ -243,12 +243,12 @@ function! db#connect(url) abort
   endif
   let input = s:temp_content(db#adapter#call(url, 'auth_input', [], "\n"))
   let pattern = db#adapter#call(url, 'auth_pattern', [], 'auth\|login')
-  let [out, err] = db#systemlist(s:filter(url, input))
+  let [out, err] = db#systemlist(s:filter(url, input), 1)
   let out = join(out, "\n")
   if err && out =~? pattern && resolved =~# '^[^:]*://[^:/@]*@'
     let password = inputsecret('Password: ')
     let url = substitute(resolved, '://[^:/@]*\zs@', ':'.db#url#encode(password).'@', '')
-    let [out, err] = db#systemlist(s:filter(url, input))
+    let [out, err] = db#systemlist(s:filter(url, input), 1)
     let out = join(out, "\n")
     if !err
       let s:passwords[resolved] = password
