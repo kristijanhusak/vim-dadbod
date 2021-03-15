@@ -9,6 +9,15 @@ endif
 
 let s:supports_async = has('nvim') || exists('*job_start')
 
+" Hide pointless `No matching autocommands` in Vim
+if !has('nvim')
+  augroup db_dummy_autocmd
+    autocmd!
+    autocmd User DBQueryStart "
+    autocmd User DBQueryFinished "
+  augroup END
+endif
+
 function! s:expand(expr) abort
   return exists('*DotenvExpand') ? DotenvExpand(a:expr) : expand(a:expr)
 endfunction
@@ -198,6 +207,7 @@ function! s:filter_write(url, in, out) abort
   let cmd = s:filter(a:url, a:in)
   if s:supports_async
     call s:check_job_running()
+    doautocmd User DBQueryStart
     echo 'DB: Running query...'
     call setbufvar(bufnr(a:out), '&modified', 1)
     let t:db_job_id = db#job#run(cmd, function('s:query_callback', [a:out]))
@@ -216,6 +226,7 @@ function! s:query_callback(out, lines, status)
   let status_msg = a:status ? 'DB: Canceled' : 'DB: Done'
   call writefile(a:lines, a:out, 'b')
   call setbufvar(bufnr(a:out), '&modified', 0)
+  doautocmd User DBQueryFinished
 
   if winnr ==? -1
     echo status_msg
