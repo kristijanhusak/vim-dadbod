@@ -172,9 +172,8 @@ function! s:systemlist_async(cmd, return_err_status)
   return content
 endfunction
 
-function! s:check_job_running() abort
-  let is_running = db#job#is_running(get(t:, 'db_job_id', ''))
-  if is_running
+function! s:check_job_running(bang) abort
+  if !a:bang && get(t:, 'db_job_running', 0)
     throw 'DB: Query already running for this tab'
   endif
 endfunction
@@ -197,10 +196,14 @@ endfunction
 function! s:filter_write(url, in, out, mods, bang) abort
   let cmd = s:filter(a:url, a:in)
   if s:supports_async
-    call s:check_job_running()
+    call s:check_job_running(a:bang)
+    if !a:bang
+      let t:db_job_running = 1
+    endif
     echo 'DB: Running query...'
     call setbufvar(bufnr(a:out), '&modified', 1)
-    let t:db_job_id = db#job#run(cmd, function('s:query_callback', [a:out, a:mods, a:bang]))
+    let job_id = db#job#run(cmd, function('s:query_callback', [a:out, a:mods, a:bang]))
+    call setbufvar(bufnr(a:out), 'db_job_id', job_id)
     return
   endif
   let lines = s:systemlist(cmd)
@@ -211,14 +214,19 @@ function! s:filter_write(url, in, out, mods, bang) abort
 endfunction
 
 function! s:query_callback(out, mods, bang, lines, status)
-  unlet! t:db_job_id
+  if !a:bang
+    unlet! t:db_job_running
+  endif
   let winnr = bufwinnr(bufnr(a:out))
   let status_msg = a:status ? 'DB: Canceled' : 'DB: Done'
   call writefile(a:lines, a:out, 'b')
   call setbufvar(bufnr(a:out), '&modified', 0)
+  call setbufvar(bufnr(a:out), 'db_job_id', '')
 
   if winnr ==? -1
-    call s:open_preview(a:out, a:mods, a:bang)
+    if !a:status
+      call s:open_preview(a:out, a:mods, a:bang)
+    endif
     echo status_msg
     return
   endif
@@ -288,12 +296,12 @@ if !exists('s:results')
 endif
 
 function! s:init() abort
-  setlocal nowrap nolist readonly nomodifiable nobuflisted bufhidden=delete
+  setlocal nowrap nolist readonly nomodifiable nobuflisted bufhidden=hide
   let &l:statusline = substitute(&statusline, '%\([^[:alpha:]{!]\+\)[fFt]', '%\1{db#url#safe_format(b:db)}', '')
   nnoremap <buffer><silent> q :bd<CR>
   nnoremap <buffer><nowait> r :DB <C-R>=get(readfile(b:db_input, 1), 0)<CR>
   nnoremap <buffer><silent> R :call <SID>reload()<CR>
-  nnoremap <buffer><silent> <C-c> :call db#job#cancel(get(t:, 'db_job_id', ''))<CR>
+  nnoremap <buffer><silent> <C-c> :call db#job#cancel(get(b:, 'db_job_id', ''))<CR>
 endfunction
 
 function! db#unlet() abort
@@ -344,7 +352,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
         redraw!
       endif
     else
-      call s:check_job_running()
+      call s:check_job_running(a:bang)
       let file = tempname()
       let infile = file . '.' . db#adapter#call(conn, 'input_extension', [], 'sql')
       let outfile = file . '.' . db#adapter#call(conn, 'output_extension', [], 'dbout')
@@ -409,8 +417,8 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
             \ '| let b:db =' string(conn)
             \ '| let w:db = b:db'
             \ '| call s:init()'
-      execute 'autocmd BufDelete' fnameescape(tr(outfile, '\', '/'))
-            \ 'call db#job#cancel(get(t:, "db_job_id", ""))'
+      execute 'autocmd BufUnload' fnameescape(tr(outfile, '\', '/'))
+            \ 'call db#job#cancel(getbufvar(str2nr(expand("<abuf>")), "db_job_id", ""))'
       let s:results[conn] = outfile
       if a:bang
         call s:open_preview(outfile, mods, a:bang)
