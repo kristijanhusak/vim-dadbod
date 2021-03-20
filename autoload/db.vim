@@ -154,10 +154,13 @@ endfunction
 function! db#systemlist(cmd, ...) abort
   let return_err_status = len(a:000) ==# 1 && type(a:1) ==# type(0)
   let cmd = type(a:cmd) ==# type([]) ? a:cmd : [a:cmd]
+  if !return_err_status
+    let cmd += a:000
+  endif
 
   let job_result = { 'content': [], 'status': 0 }
 
-  let job = db#job#run(a:cmd + a:000, function('s:systemlist_job_cb', [job_result]))
+  let job = db#job#run(cmd, function('s:systemlist_job_cb', [job_result]))
   call db#job#wait(job)
 
   if return_err_status
