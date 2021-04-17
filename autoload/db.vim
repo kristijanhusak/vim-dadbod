@@ -44,12 +44,27 @@ function! s:resolve(url) abort
   else
     let url = a:url
   endif
-  if type(url) == type('') && url =~# '^[gtwb]:\w'
-    if has_key(eval(matchstr(url, '^\w:')), matchstr(url, ':\zs.*'))
-      let url = eval(url)
+  let c = 5
+  while c > 0
+    let c -= 1
+    if type(url) == type({}) && len(get(url, 'db_url', ''))
+      let l:.url = url.db_url
+    elseif type(url) == type({}) && len(get(url, 'url', ''))
+      let l:.url = url.url
+    elseif type(url) == type({}) && len(get(url, 'scheme', ''))
+      let l:.url = db#url#format(url)
+    elseif type(url) == type('') && url =~# '^[gtwb]:\w'
+      if has_key(eval(matchstr(url, '^\w:')), matchstr(url, ':\zs.*'))
+        let url = eval(url)
+      else
+        throw 'DB: no such variable ' . url
+      endif
     else
-      throw 'DB: no such variable ' . url
+      break
     endif
+  endwhile
+  if type(url) !=# type('')
+    throw 'DB: URL is not a string'
   endif
   if url =~# '^type=\|^profile='
     let url = 'dbext:'.url
@@ -140,13 +155,13 @@ function! s:temp_content(str) abort
   return s:temp_content[key]
 endfunction
 
-function! s:filter(url, in) abort
-  if db#adapter#supports(a:url, 'input')
-    return db#adapter#dispatch(a:url, 'input', a:in)
+function! s:filter(url, in, ...) abort
+  let prefer_filter = a:0 && a:1
+  if db#adapter#supports(a:url, 'input') && !(prefer_filter && db#adapter#supports(a:url, 'filter'))
+    return [db#adapter#dispatch(a:url, 'input', a:in), '']
   endif
   let op = db#adapter#supports(a:url, 'filter') ? 'filter' : 'interactive'
-  return s:shell(db#adapter#dispatch(a:url, op)) . ' ' .
-        \ db#adapter#call(a:url, 'input_flag', [], '< ') . shellescape(a:in)
+  return [db#adapter#dispatch(a:url, op), a:in]
 endfunction
 
 function! s:check_job_running(bang) abort
@@ -161,25 +176,22 @@ function! s:systemlist_job_cb(data, output, status) abort
 endfunction
 
 function! db#systemlist(cmd, ...) abort
-  let return_err_status = len(a:000) ==# 1 && type(a:1) ==# type(0)
-  let cmd = a:cmd
-  if !return_err_status && type(a:cmd) ==# type([])
-    let cmd += a:000
-  endif
-
   let job_result = { 'content': [], 'status': 0 }
-
-  let job = db#job#run(cmd, function('s:systemlist_job_cb', [job_result]))
+  let job = db#job#run(a:cmd + a:000, function('s:systemlist_job_cb', [job_result]), '')
   call db#job#wait(job)
-
-  if return_err_status
-    return [job_result.content, job_result.status]
-  endif
   return job_result.content
 endfunction
 
-function! s:filter_write(url, in, out, mods, bang) abort
-  let cmd = s:filter(a:url, a:in)
+function! s:systemlist_with_err(cmd)
+  let [cmd, stdin_file] = a:cmd
+  let job_result = { 'content': [], 'status': 0 }
+  let job = db#job#run(cmd, function('s:systemlist_job_cb', [job_result]), stdin_file)
+  call db#job#wait(job)
+  return [job_result.content, job_result.status]
+endfunction
+
+function! s:filter_write(url, in, out, mods, bang, prefer_filter) abort
+  let [cmd, stdin_file] = s:filter(a:url, a:in, a:prefer_filter)
   call s:check_job_running(a:bang)
   if !a:bang
     let t:db_job_running = 1
@@ -187,7 +199,7 @@ function! s:filter_write(url, in, out, mods, bang) abort
   doautocmd User DBQueryStart
   echo 'DB: Running query...'
   call setbufvar(bufnr(a:out), '&modified', 1)
-  let job_id = db#job#run(cmd, function('s:query_callback', [a:out, a:in, a:url, a:mods, a:bang]))
+  let job_id = db#job#run(cmd, function('s:query_callback', [a:out, a:in, a:url, a:mods, a:bang]), stdin_file)
   call setbufvar(bufnr(a:out), 'db_job_id', job_id)
   return job_id
 endfunction
@@ -247,12 +259,12 @@ function! db#connect(url) abort
   endif
   let input = s:temp_content(db#adapter#call(url, 'auth_input', [], "\n"))
   let pattern = db#adapter#call(url, 'auth_pattern', [], 'auth\|login')
-  let [out, err] = db#systemlist(s:filter(url, input), 1)
+  let [out, err] = s:systemlist_with_err(s:filter(url, input))
   let out = join(out, "\n")
   if err && out =~? pattern && resolved =~# '^[^:]*://[^:/@]*@'
     let password = inputsecret('Password: ')
     let url = substitute(resolved, '://[^:/@]*\zs@', ':'.db#url#encode(password).'@', '')
-    let [out, err] = db#systemlist(s:filter(url, input), 1)
+    let [out, err] = s:systemlist_with_err(s:filter(url, input))
     let out = join(out, "\n")
     if !err
       let s:passwords[resolved] = password
@@ -265,7 +277,7 @@ function! db#connect(url) abort
 endfunction
 
 function! s:reload() abort
-  call s:filter_write(b:db, b:db_input, expand('%:p'), b:db_mods, b:db_bang)
+  call s:filter_write(b:db, b:db_input, expand('%:p'), b:db_mods, b:db_bang, get(b:, 'db_prefer_filter', 1))
 endfunction
 
 let s:url_pattern = '\%([abgltvw]:\w\+\|\a[[:alnum:].+-]\+:\S*\|\$[[:alpha:]_]\S*\|[.~]\=/\S*\|[.~]\|\%(type\|profile\)=\S\+\)\S\@!'
@@ -283,6 +295,7 @@ function! s:init() abort
   setlocal nowrap nolist readonly nomodifiable nobuflisted
   let &l:statusline = substitute(&statusline, '%\([^[:alpha:]{!]\+\)[fFt]', '%\1{db#url#safe_format(b:db)}', '')
   nnoremap <buffer><silent> q :bd<CR>
+  nnoremap <buffer><silent> gq :bdelete<CR>
   nnoremap <buffer><nowait> r :DB <C-R>=get(readfile(b:db_input, 1), 0)<CR>
   nnoremap <buffer><silent> R :call <SID>reload()<CR>
   nnoremap <buffer><silent> <C-c> :call db#job#cancel(get(b:, 'db_job_id', ''))<CR>
@@ -294,8 +307,7 @@ endfunction
 
 function! db#execute_command(mods, bang, line1, line2, cmd) abort
   if !has('nvim') && !exists('*job_start')
-    echoerr 'DB: Vim version with +job feature is required.'
-    return
+    return 'echoerr "DB: Vim version with +job feature is required."'
   end
   if type(a:cmd) == type(0)
     " Error generating arguments
@@ -398,6 +410,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
             \ 'let b:db_input =' string(infile)
             \ '| let b:db_mods =' string(mods)
             \ '| let b:db_bang =' string(a:bang)
+            \ '| let b:db_prefer_filter = ' exists('lines')
             \ '| let b:db =' string(conn)
             \ '| let w:db = b:db'
             \ '| call s:init()'
@@ -405,7 +418,7 @@ function! db#execute_command(mods, bang, line1, line2, cmd) abort
             \ 'call db#job#cancel(getbufvar(str2nr(expand("<abuf>")), "db_job_id", ""))'
       let s:results[conn] = outfile
       call s:open_preview(outfile, mods, a:bang)
-      call s:filter_write(conn, infile, outfile, mods, a:bang)
+      call s:filter_write(conn, infile, outfile, mods, a:bang, exists('lines'))
     endif
   catch /^DB exec error: /
     redraw
